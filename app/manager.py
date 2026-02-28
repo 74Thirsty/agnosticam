@@ -3,19 +3,32 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 from dataclasses import asdict
 import secrets
 import socket
 import sqlite3
+import ipaddress
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 from urllib.parse import urlparse
 
+from app.models import (
+    Camera,
+    CameraLayout,
+    CameraStatus,
+    FleetSummary,
+    ScanRun,
+    ShodanScanResult,
+    User,
+    UserRole,
+    ShodanHost,  # <-- Add this import
+)
+
 UTC = timezone.utc
-
-from app.models import Camera, CameraLayout, CameraStatus, FleetSummary, User, UserRole
-
 
 class ValidationError(ValueError):
     """Raised when input violates constraints."""
@@ -34,8 +47,9 @@ class AuthError(PermissionError):
 
 
 class FleetManager:
-    def __init__(self, db_path: str | Path = "agnosticam.db") -> None:
+    def __init__(self, db_path: str | Path = "agnosticam.db", *, shodan_client=None) -> None:
         self.db_path = str(db_path)
+        self.shodan_client = shodan_client
         self._initialize_db()
 
     @contextmanager
@@ -96,6 +110,30 @@ class FleetManager:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS shodan_scans (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    query TEXT NOT NULL,
+                    total INTEGER NOT NULL,
+                    matches_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scan_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source TEXT NOT NULL,
+                    query TEXT NOT NULL,
+                    created_by INTEGER NOT NULL,
+                    imported_count INTEGER NOT NULL,
+                    notes TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
             if not conn.execute("SELECT id FROM users LIMIT 1").fetchone():
                 now = self._now().isoformat()
                 conn.execute(
@@ -116,16 +154,10 @@ class FleetManager:
 
     @staticmethod
     def _validate_ip(ip_address: str) -> str:
-        parts = ip_address.strip().split(".")
-        if len(parts) != 4:
-            raise ValidationError("ip_address must be an IPv4 address")
         try:
-            values = [int(p) for p in parts]
-        except ValueError as exc:
-            raise ValidationError("ip_address must contain numeric octets") from exc
-        if any(v < 0 or v > 255 for v in values):
-            raise ValidationError("ip_address octets must be 0-255")
-        return ".".join(str(v) for v in values)
+            return str(ipaddress.IPv4Address(ip_address.strip()))
+        except ipaddress.AddressValueError as exc:
+            raise ValidationError("ip_address must be an IPv4 address") from exc
 
     @staticmethod
     def _normalize_tags(tags: list[str] | tuple[str, ...] | None) -> tuple[str, ...]:
@@ -142,6 +174,42 @@ class FleetManager:
             return status if isinstance(status, CameraStatus) else CameraStatus(status.lower())
         except Exception as exc:
             raise ValidationError("status must be online, offline, or maintenance") from exc
+
+    @staticmethod
+    def _build_location(city: str | None, country: str | None) -> str | None:
+        parts = [p for p in [city, country] if p]
+        return ", ".join(parts) if parts else None
+
+    @staticmethod
+    def _to_shodan_host(item: dict) -> ShodanHost:
+        timestamp = None
+        if item.get("timestamp"):
+            try:
+                timestamp = datetime.fromisoformat(item["timestamp"].replace("Z", "+00:00"))
+            except ValueError:
+                timestamp = None
+        loc = item.get("location") or {}
+        location = FleetManager._build_location(loc.get("city"), loc.get("country_name"))
+        return ShodanHost(
+            ip_address=item.get("ip_str", ""),
+            port=int(item.get("port") or 0),
+            transport=item.get("transport") or "tcp",
+            org=item.get("org"),
+            isp=item.get("isp"),
+            os=item.get("os"),
+            hostnames=tuple(item.get("hostnames") or []),
+            domains=tuple(item.get("domains") or []),
+            product=item.get("product"),
+            title=(item.get("http") or {}).get("title") if isinstance(item.get("http"), dict) else None,
+            location=location,
+            timestamp=timestamp,
+        )
+
+    def _shodan_key(self) -> str:
+        key = os.getenv("AGNOSTICAM_SHODAN_API_KEY", "").strip()
+        if not key:
+            raise ValidationError("AGNOSTICAM_SHODAN_API_KEY is not configured")
+        return key
 
     @staticmethod
     def _hash_password(password: str) -> str:
@@ -181,6 +249,18 @@ class FleetManager:
             email=row["email"],
             role=UserRole(row["role"]),
             is_active=bool(row["is_active"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    @staticmethod
+    def _scan_run_from_row(row: sqlite3.Row) -> ScanRun:
+        return ScanRun(
+            id=row["id"],
+            source=row["source"],
+            query=row["query"],
+            created_by=row["created_by"],
+            imported_count=row["imported_count"],
+            notes=row["notes"],
             created_at=datetime.fromisoformat(row["created_at"]),
         )
 
@@ -243,7 +323,7 @@ class FleetManager:
         manufacturer: str,
         model_name: str,
         status: str | CameraStatus = CameraStatus.OFFLINE,
-        tags: list[str] | None = None,
+        tags: tuple[str, ...] | list[str] | None = None,
         is_active: bool = True,
     ) -> Camera:
         name = self._validate_string("name", name, min_len=3, max_len=80)
@@ -304,7 +384,7 @@ class FleetManager:
             params.append(self._validate_status(status).value)
         if active is not None:
             where.append("is_active = ?")
-            params.append(int(active))
+            params.append(str(int(active)))
         for tag in self._normalize_tags(tags):
             where.append("lower(tags) LIKE ?")
             params.append(f"%{tag}%")
@@ -339,14 +419,19 @@ class FleetManager:
         }
         payload.update(changes)
 
-        payload["name"] = self._validate_string("name", payload["name"], min_len=3, max_len=80)
-        payload["ip_address"] = self._validate_ip(payload["ip_address"])
-        payload["stream_url"] = self._validate_string("stream_url", payload["stream_url"], min_len=8, max_len=250)
-        payload["location"] = self._validate_string("location", payload["location"])
-        payload["manufacturer"] = self._validate_string("manufacturer", payload["manufacturer"])
-        payload["model_name"] = self._validate_string("model_name", payload["model_name"])
-        payload["status"] = self._validate_status(payload["status"]).value
-        payload["tags"] = ",".join(self._normalize_tags(payload["tags"]))
+        payload["name"] = self._validate_string("name", str(payload["name"]), min_len=3, max_len=80)
+        payload["ip_address"] = self._validate_ip(str(payload["ip_address"]))
+        payload["stream_url"] = self._validate_string("stream_url", str(payload["stream_url"]), min_len=8, max_len=250)
+        payload["location"] = self._validate_string("location", str(payload["location"]))
+        payload["manufacturer"] = self._validate_string("manufacturer", str(payload["manufacturer"]))
+        payload["model_name"] = self._validate_string("model_name", str(payload["model_name"]))
+        payload["status"] = self._validate_status(str(payload["status"])).value
+        tags_value = payload["tags"]
+        if isinstance(tags_value, str):
+            tags_value = [t for t in tags_value.split(",") if t]
+        elif not isinstance(tags_value, (list, tuple)) and tags_value is not None:
+            tags_value = [str(tags_value)]
+        payload["tags"] = ",".join(self._normalize_tags(tags_value))
 
         with self._conn() as conn:
             try:
@@ -360,7 +445,7 @@ class FleetManager:
                     (
                         payload["name"], payload["ip_address"], payload["stream_url"], payload["location"],
                         payload["manufacturer"], payload["model_name"], payload["status"], payload["tags"],
-                        int(payload["is_active"]), self._now().isoformat(), camera_id,
+                        int(bool(payload["is_active"])), self._now().isoformat(), camera_id,
                     ),
                 )
             except sqlite3.IntegrityError as exc:
@@ -432,6 +517,91 @@ class FleetManager:
             rows = conn.execute("SELECT * FROM layouts ORDER BY updated_at DESC").fetchall()
         return [self._layout_from_row(r) for r in rows]
 
+
+    def list_scan_runs(self) -> list[ScanRun]:
+        with self._conn() as conn:
+            rows = conn.execute("SELECT * FROM scan_runs ORDER BY id DESC LIMIT 100").fetchall()
+        return [self._scan_run_from_row(row) for row in rows]
+
+
+    def import_shodan_results(self, *, query: str, created_by: int, limit: int = 15) -> dict:
+        if self.shodan_client is None:
+            raise ValidationError("Shodan integration is not configured")
+        query = self._validate_string("query", query, min_len=2, max_len=180)
+        self.get_user(created_by)
+
+        results: list[ShodanHost] = self.shodan_client.search(query, limit=limit)
+        imported = 0
+        updated = 0
+        skipped = 0
+        imported_ids: list[int] = []
+        for idx, result in enumerate(results, start=1):
+            if not result.ip_address:
+                skipped += 1
+                continue
+            name = f"shodan-{result.ip_address}-{result.port}".replace(".", "-")
+            product = (result.product or "unknown").strip() or "unknown"
+            location = result.location or "n/a, n/a"
+            tags = ["shodan", result.transport.lower(), f"port-{result.port}"]
+            stream_url = f"rtsp://{result.ip_address}:{result.port}/"
+
+            existing, total = self.list_cameras(query=result.ip_address, page_size=1)
+            if total and existing:
+                camera = self.update_camera(
+                    existing[0].id,
+                    location=location,
+                    manufacturer=(result.org or "Internet")[0:120],
+                    model_name=product[0:120],
+                    tags=list(set(existing[0].tags) | set(tags)),
+                )
+                updated += 1
+                imported_ids.append(camera.id)
+                continue
+            try:
+                camera = self.add_camera(
+                    name=name[0:80],
+                    ip_address=result.ip_address,
+                    stream_url=stream_url,
+                    location=location[0:120],
+                    manufacturer=(result.org or "Internet")[0:120],
+                    model_name=product[0:120],
+                    status=CameraStatus.OFFLINE,
+                    tags=tags,
+                )
+                imported += 1
+                imported_ids.append(camera.id)
+            except (ValidationError, CameraConflictError):
+                alt_name = f"{name}-{idx}"[0:80]
+                camera = self.add_camera(
+                    name=alt_name,
+                    ip_address=result.ip_address,
+                    stream_url=stream_url,
+                    location=location[0:120],
+                    manufacturer=(result.org or "Internet")[0:120],
+                    model_name=product[0:120],
+                    status=CameraStatus.OFFLINE,
+                    tags=tags,
+                )
+                imported += 1
+                imported_ids.append(camera.id)
+
+        now = self._now().isoformat()
+        notes = f"results={len(results)} updated={updated} skipped={skipped}"
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO scan_runs (source, query, created_by, imported_count, notes, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                ("shodan", query, created_by, imported + updated, notes, now),
+            )
+        return {
+            "query": query,
+            "results": len(results),
+            "imported": imported,
+            "updated": updated,
+            "skipped": skipped,
+            "camera_ids": imported_ids,
+        }
+
+
     def export_json(self, path: str | Path) -> Path:
         cameras, _ = self.list_cameras(page_size=10_000)
         users = self.list_users()
@@ -445,3 +615,79 @@ class FleetManager:
         output = Path(path)
         output.write_text(json.dumps(payload, default=str, indent=2))
         return output
+
+    def shodan_search(self, *, query: str, page: int = 1) -> ShodanScanResult:
+        query = self._validate_string("query", query, min_len=2, max_len=120)
+        if page < 1:
+            raise ValidationError("page must be positive")
+
+        key = self._shodan_key()
+        url = f"https://api.shodan.io/shodan/host/search?key={key}&query={query.replace(' ', '%20')}&page={page}"
+        try:
+            with urllib_request.urlopen(url, timeout=10) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib_error.HTTPError as exc:
+            details = exc.read().decode("utf-8", errors="ignore")
+            raise ValidationError(f"Shodan request failed: {details or exc.reason}") from exc
+        except urllib_error.URLError as exc:
+            raise ValidationError(f"Shodan unreachable: {exc.reason}") from exc
+
+        hosts = tuple(self._to_shodan_host(item) for item in payload.get("matches", []))
+        now = self._now().isoformat()
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO shodan_scans (query, total, matches_json, created_at) VALUES (?, ?, ?, ?)",
+                (query, payload.get("total", 0), json.dumps(payload.get("matches", [])), now),
+            )
+        return ShodanScanResult(
+            query=query,
+            total=int(payload.get("total", 0)),
+            hosts=hosts,
+            created_at=now,
+        )
+
+    def list_shodan_scans(self, *, limit: int = 20) -> list[ShodanScanResult]:
+        if limit < 1 or limit > 100:
+            raise ValidationError("limit must be between 1 and 100")
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT query, total, matches_json, created_at FROM shodan_scans ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [
+            ShodanScanResult(
+                query=row["query"],
+                total=int(row["total"]),
+                hosts=tuple(self._to_shodan_host(item) for item in json.loads(row["matches_json"])),
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
+
+    def import_shodan_hosts(self, hosts: list[dict], *, default_location: str = "Internet") -> list[Camera]:
+        created = []
+        for item in hosts:
+            host = self._to_shodan_host(item)
+            if not host.ip_address or not host.port:
+                continue
+            stream_url = f"{host.transport or 'tcp'}://{host.ip_address}:{host.port}"
+            model_name = host.product or host.title or "Unknown Model"
+            manufacturer = host.org or host.isp or "Unknown Vendor"
+            location = host.location or default_location
+            name = f"Shodan {host.ip_address}:{host.port}"
+            tags = ["shodan", host.transport]
+            try:
+                camera = self.add_camera(
+                    name=name,
+                    ip_address=host.ip_address,
+                    stream_url=stream_url,
+                    location=location,
+                    manufacturer=manufacturer,
+                    model_name=model_name,
+                    status=CameraStatus.OFFLINE,
+                    tags=tags,
+                )
+                created.append(camera)
+            except CameraConflictError:
+                continue
+        return created

@@ -3,7 +3,7 @@
 AgnostiCam is a **self-hosted camera operations dashboard** for IP cameras you explicitly configure yourself.
 
 > ✅ Designed for authorized, manually managed camera fleets.
-> ❌ No auto-hunting, no Shodan scanning, no internet-wide camera discovery.
+> ⚠️ Optional Shodan integration is available when you set an API key for authorized discovery workflows.
 
 ## Features
 
@@ -17,6 +17,7 @@ AgnostiCam is a **self-hosted camera operations dashboard** for IP cameras you e
 - Saved camera layouts (`2x2`, `3x3`)
 - Fleet analytics summary
 - CLI + JSON export for integrations/backups
+- Optional Shodan search + one-click host import into camera registry (GUI + API + CLI)
 
 ## Default credentials
 
@@ -50,4 +51,14 @@ python -m app.cli export fleet-export.json
 
 ```bash
 pytest
+```
+
+
+## Shodan integration
+
+Set `AGNOSTICAM_SHODAN_API_KEY` before running the web app or CLI to enable Shodan search/import.
+
+```bash
+export AGNOSTICAM_SHODAN_API_KEY=your_key
+python -m app.cli shodan-search "product:webcam"
 ```

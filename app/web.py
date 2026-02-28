@@ -109,6 +109,12 @@ class APIServer(BaseHTTPRequestHandler):
             if parsed.path == "/api/summary":
                 self._auth_user()
                 return self._json(200, asdict(self.manager.summary()))
+            if parsed.path == "/api/shodan/scans":
+                self._auth_user(require_admin=True)
+                qs = parse_qs(parsed.query)
+                limit = int(qs.get("limit", ["20"])[0])
+                scans = self.manager.list_shodan_scans(limit=limit)
+                return self._json(200, {"items": [asdict(i) for i in scans]})
         except (AuthError, ValidationError, CameraNotFoundError) as exc:
             return self._json(401 if isinstance(exc, AuthError) else 400, {"error": str(exc)})
 
@@ -153,6 +159,14 @@ class APIServer(BaseHTTPRequestHandler):
                     created_by=user_id,
                 )
                 return self._json(201, asdict(layout))
+            if parsed.path == "/api/shodan/search":
+                self._auth_user(require_admin=True)
+                result = self.manager.shodan_search(query=body.get("query", ""), page=int(body.get("page", 1)))
+                return self._json(200, asdict(result))
+            if parsed.path == "/api/shodan/import":
+                self._auth_user(require_admin=True)
+                created = self.manager.import_shodan_hosts(body.get("hosts", []), default_location=body.get("default_location", "Internet"))
+                return self._json(201, {"count": len(created), "items": [asdict(c) for c in created]})
         except AuthError as exc:
             return self._json(401, {"error": str(exc)})
         except (ValidationError, CameraNotFoundError, CameraConflictError, KeyError) as exc:

@@ -62,6 +62,22 @@
         </table>
       </section>
 
+
+      <section class="card">
+        <h2>Shodan Scan</h2>
+        <div class="grid2">
+          <input id="shodanQuery" placeholder="Shodan query (e.g. product:&quot;webcam&quot;)" />
+          <input id="shodanLocation" placeholder="Default import location" value="Internet" />
+          <button id="shodanSearchBtn">Search Shodan</button>
+          <button id="shodanImportBtn">Import selected hosts as cameras</button>
+        </div>
+        <p id="shodanTotal" class="small"></p>
+        <table>
+          <thead><tr><th>Pick</th><th>IP</th><th>Port</th><th>Transport</th><th>Product</th><th>Org/ISP</th><th>Location</th></tr></thead>
+          <tbody id="shodanRows"></tbody>
+        </table>
+      </section>
+
       <section class="card">
         <h2>Saved Layouts</h2>
         <div class="grid2">

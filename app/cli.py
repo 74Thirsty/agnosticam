@@ -53,8 +53,18 @@ def main() -> int:
     export = sub.add_parser("export", help="Export all data")
     export.add_argument("output")
 
+    shodan_search = sub.add_parser("shodan-search", help="Search Shodan hosts")
+    shodan_search.add_argument("query")
+    shodan_search.add_argument("--page", type=int, default=1)
+
+    shodan_import = sub.add_parser("shodan-import", help="Import last Shodan scan into cameras")
+    shodan_import.add_argument("--limit", type=int, default=1)
+    shodan_import.add_argument("--default-location", default="Internet")
+
     args = parser.parse_args()
-    mgr = FleetManager(args.db)
+    shodan_key = getattr(args, "api_key", None) or __import__("os").getenv("AGNOSTICAM_SHODAN_API_KEY", "")
+    shodan_client = ShodanClient(shodan_key) if shodan_key else None
+    mgr = FleetManager(args.db, shodan_client=shodan_client)
 
     try:
         if args.command == "add-user":
@@ -106,6 +116,15 @@ def main() -> int:
             )
         elif args.command == "export":
             print(f"Exported to {mgr.export_json(Path(args.output))}")
+        elif args.command == "shodan-search":
+            print(json.dumps(asdict(mgr.shodan_search(query=args.query, page=args.page)), default=str, indent=2))
+        elif args.command == "shodan-import":
+            scans = mgr.list_shodan_scans(limit=args.limit)
+            hosts = []
+            for scan in scans:
+                hosts.extend([asdict(host) for host in scan.hosts])
+            created = mgr.import_shodan_hosts(hosts, default_location=args.default_location)
+            print(json.dumps({"count": len(created), "items": [asdict(c) for c in created]}, default=str, indent=2))
 
     except (ValidationError, CameraConflictError, CameraNotFoundError, AuthError) as exc:
         print(f"Error: {exc}")

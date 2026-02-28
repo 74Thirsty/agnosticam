@@ -109,6 +109,7 @@ def test_layout_summary_and_export(manager: FleetManager, tmp_path: Path) -> Non
 
 
 def test_validation_and_auth_errors(manager: FleetManager) -> None:
+
     with pytest.raises(ValidationError):
         manager.add_camera(
             name="x",
@@ -121,3 +122,64 @@ def test_validation_and_auth_errors(manager: FleetManager) -> None:
 
     with pytest.raises(AuthError):
         manager.authenticate_user(email="admin@agnosticam.local", password="wrongpass")
+
+
+def test_allows_public_and_non_rtsp_stream_urls(manager: FleetManager) -> None:
+    camera = manager.add_camera(
+        name="RemoteCam",
+        ip_address="8.8.8.8",
+        stream_url="ftp://8.8.8.8/feed",
+        location="Internet",
+        manufacturer="Axis",
+        model_name="R1",
+    )
+
+    assert camera.ip_address == "8.8.8.8"
+    assert camera.stream_url == "ftp://8.8.8.8/feed"
+
+
+def test_shodan_search_and_import(manager: FleetManager, monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeResponse:
+        def __init__(self, payload: str) -> None:
+            self.payload = payload.encode("utf-8")
+
+        def read(self) -> bytes:
+            return self.payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    payload = {
+        "total": 1,
+        "matches": [
+            {
+                "ip_str": "8.8.8.8",
+                "port": 554,
+                "transport": "rtsp",
+                "org": "Google",
+                "product": "CamX",
+                "location": {"city": "Mountain View", "country_name": "United States"},
+            }
+        ],
+    }
+
+    def fake_urlopen(_url: str, timeout: int = 10):
+        return FakeResponse(__import__("json").dumps(payload))
+
+    monkeypatch.setenv("AGNOSTICAM_SHODAN_API_KEY", "test-key")
+    monkeypatch.setattr("app.manager.urllib_request.urlopen", fake_urlopen)
+
+    result = manager.shodan_search(query="product:webcam")
+    assert result.total == 1
+    assert result.hosts[0].ip_address == "8.8.8.8"
+
+    created = manager.import_shodan_hosts([payload["matches"][0]])
+    assert len(created) == 1
+    assert created[0].ip_address == "8.8.8.8"
+
+    scans = manager.list_shodan_scans(limit=5)
+    assert scans
+    assert scans[0].query == "product:webcam"
