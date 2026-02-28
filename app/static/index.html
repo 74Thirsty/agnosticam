@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AgnostiCam Dashboard</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>AgnostiCam Dashboard</h1>
+      <div id="authBox">
+        <input id="email" placeholder="Email" value="admin@agnosticam.local" />
+        <input id="password" placeholder="Password" type="password" value="admin123" />
+        <button id="loginBtn">Login</button>
+        <span id="me"></span>
+      </div>
+    </header>
+
+    <main>
+      <section class="card">
+        <h2>Fleet Summary</h2>
+        <div id="summary" class="stats"></div>
+      </section>
+
+      <section class="card">
+        <h2>Register Camera</h2>
+        <form id="cameraForm" class="grid2">
+          <input name="name" placeholder="Name" required />
+          <input name="ip_address" placeholder="IP address" required />
+          <input name="stream_url" placeholder="Stream URL" required />
+          <input name="location" placeholder="Location" required />
+          <input name="manufacturer" placeholder="Manufacturer" required />
+          <input name="model_name" placeholder="Model" required />
+          <input name="tags" placeholder="Tags (comma separated)" />
+          <select name="status">
+            <option value="offline">offline</option>
+            <option value="online">online</option>
+            <option value="maintenance">maintenance</option>
+          </select>
+          <button>Create Camera</button>
+        </form>
+      </section>
+
+      <section class="card">
+        <h2>Filter</h2>
+        <div class="grid2">
+          <input id="query" placeholder="Search name/location/manufacturer/model" />
+          <input id="locationFilter" placeholder="Location" />
+          <input id="tagFilter" placeholder="Tag" />
+          <button id="refreshBtn">Refresh</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Cameras</h2>
+        <table>
+          <thead>
+            <tr><th>Name</th><th>Location</th><th>IP</th><th>Status</th><th>Tags</th><th>Health</th><th>Actions</th></tr>
+          </thead>
+          <tbody id="cameraRows"></tbody>
+        </table>
+      </section>
+
+      <section class="card">
+        <h2>Saved Layouts</h2>
+        <div class="grid2">
+          <input id="layoutName" placeholder="Layout name" />
+          <select id="gridType"><option>2x2</option><option>3x3</option></select>
+          <button id="saveLayoutBtn">Save layout from active camera IDs</button>
+        </div>
+        <ul id="layoutList"></ul>
+      </section>
+
+      <section class="card">
+        <h2>Multi-view Preview</h2>
+        <p>Simulated tiles for selected cameras.</p>
+        <div id="multiview" class="multiview"></div>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
