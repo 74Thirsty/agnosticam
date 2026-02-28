@@ -8,9 +8,11 @@ import secrets
 import socket
 import sqlite3
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
+
+UTC = timezone.utc
 
 from app.models import Camera, CameraLayout, CameraStatus, FleetSummary, User, UserRole
 
@@ -400,14 +402,14 @@ class FleetManager:
 
     def summary(self) -> FleetSummary:
         with self._conn() as conn:
-            total = conn.execute("SELECT COUNT(*) FROM cameras").fetchone()[0]
+            total_cameras = conn.execute("SELECT COUNT(*) FROM cameras").fetchone()[0]
             online = conn.execute("SELECT COUNT(*) FROM cameras WHERE status = ?", (CameraStatus.ONLINE.value,)).fetchone()[0]
             offline = conn.execute("SELECT COUNT(*) FROM cameras WHERE status = ?", (CameraStatus.OFFLINE.value,)).fetchone()[0]
             maintenance = conn.execute("SELECT COUNT(*) FROM cameras WHERE status = ?", (CameraStatus.MAINTENANCE.value,)).fetchone()[0]
             active = conn.execute("SELECT COUNT(*) FROM cameras WHERE is_active = 1").fetchone()[0]
             unique_locations = conn.execute("SELECT COUNT(DISTINCT location) FROM cameras").fetchone()[0]
             unique_manufacturers = conn.execute("SELECT COUNT(DISTINCT manufacturer) FROM cameras").fetchone()[0]
-        return FleetSummary(total, online, offline, maintenance, active, unique_locations, unique_manufacturers)
+        return FleetSummary(total_cameras, online, offline, maintenance, active, unique_locations, unique_manufacturers)
 
     def save_layout(self, *, name: str, grid: str, camera_ids: list[int], created_by: int) -> CameraLayout:
         name = self._validate_string("name", name, min_len=2, max_len=80)
