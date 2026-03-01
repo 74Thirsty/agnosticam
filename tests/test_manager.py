@@ -4,6 +4,7 @@ import pytest
 
 from app.manager import AuthError, CameraConflictError, CameraNotFoundError, FleetManager, ValidationError
 from app.models import CameraStatus, UserRole
+from typing import Any, cast
 
 
 @pytest.fixture()
@@ -152,7 +153,7 @@ def test_shodan_search_and_import(manager: FleetManager, monkeypatch: pytest.Mon
         def __exit__(self, exc_type, exc, tb) -> None:
             return None
 
-    payload = {
+    payload: dict[str, Any] = {
         "total": 1,
         "matches": [
             {
@@ -176,7 +177,7 @@ def test_shodan_search_and_import(manager: FleetManager, monkeypatch: pytest.Mon
     assert result.total == 1
     assert result.hosts[0].ip_address == "8.8.8.8"
 
-    created = manager.import_shodan_hosts([payload["matches"][0]])
+    created = manager.import_shodan_hosts([payload["matches"][0]])  # type: ignore[index]
     assert len(created) == 1
     assert created[0].ip_address == "8.8.8.8"
 

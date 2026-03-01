@@ -15,18 +15,7 @@ from pathlib import Path
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import urlparse
-
-from app.models import (
-    Camera,
-    CameraLayout,
-    CameraStatus,
-    FleetSummary,
-    ScanRun,
-    ShodanScanResult,
-    User,
-    UserRole,
-    ShodanHost,  # <-- Add this import
-)
+from app.models import Camera, CameraLayout, CameraStatus, FleetSummary, ShodanHost, ShodanScanResult, User, UserRole
 
 UTC = timezone.utc
 
@@ -188,8 +177,6 @@ class FleetManager:
                 timestamp = datetime.fromisoformat(item["timestamp"].replace("Z", "+00:00"))
             except ValueError:
                 timestamp = None
-        loc = item.get("location") or {}
-        location = FleetManager._build_location(loc.get("city"), loc.get("country_name"))
         return ShodanHost(
             ip_address=item.get("ip_str", ""),
             port=int(item.get("port") or 0),
@@ -201,7 +188,7 @@ class FleetManager:
             domains=tuple(item.get("domains") or []),
             product=item.get("product"),
             title=(item.get("http") or {}).get("title") if isinstance(item.get("http"), dict) else None,
-            location=location,
+            location=FleetManager._build_location((item.get("location") or {}).get("city"), (item.get("location") or {}).get("country_name")),
             timestamp=timestamp,
         )
 
@@ -249,18 +236,6 @@ class FleetManager:
             email=row["email"],
             role=UserRole(row["role"]),
             is_active=bool(row["is_active"]),
-            created_at=datetime.fromisoformat(row["created_at"]),
-        )
-
-    @staticmethod
-    def _scan_run_from_row(row: sqlite3.Row) -> ScanRun:
-        return ScanRun(
-            id=row["id"],
-            source=row["source"],
-            query=row["query"],
-            created_by=row["created_by"],
-            imported_count=row["imported_count"],
-            notes=row["notes"],
             created_at=datetime.fromisoformat(row["created_at"]),
         )
 
@@ -517,12 +492,10 @@ class FleetManager:
             rows = conn.execute("SELECT * FROM layouts ORDER BY updated_at DESC").fetchall()
         return [self._layout_from_row(r) for r in rows]
 
-
-    def list_scan_runs(self) -> list[ScanRun]:
+    def list_scan_runs(self) -> list[dict]:
         with self._conn() as conn:
             rows = conn.execute("SELECT * FROM scan_runs ORDER BY id DESC LIMIT 100").fetchall()
-        return [self._scan_run_from_row(row) for row in rows]
-
+        return [dict(row) for row in rows]
 
     def import_shodan_results(self, *, query: str, created_by: int, limit: int = 15) -> dict:
         if self.shodan_client is None:
@@ -601,7 +574,6 @@ class FleetManager:
             "camera_ids": imported_ids,
         }
 
-
     def export_json(self, path: str | Path) -> Path:
         cameras, _ = self.list_cameras(page_size=10_000)
         users = self.list_users()
@@ -616,7 +588,11 @@ class FleetManager:
         output.write_text(json.dumps(payload, default=str, indent=2))
         return output
 
-    def shodan_search(self, *, query: str, page: int = 1) -> ShodanScanResult:
+    def shodan_search(self, query: str, **kwargs):
+        """Backward-compatible alias for search_shodan."""
+        return self.search_shodan(query=query, **kwargs)
+
+    def search_shodan(self, *, query: str, page: int = 1) -> ShodanScanResult:
         query = self._validate_string("query", query, min_len=2, max_len=120)
         if page < 1:
             raise ValidationError("page must be positive")
@@ -633,18 +609,19 @@ class FleetManager:
             raise ValidationError(f"Shodan unreachable: {exc.reason}") from exc
 
         hosts = tuple(self._to_shodan_host(item) for item in payload.get("matches", []))
-        now = self._now().isoformat()
+        result = ShodanScanResult(
+            query=query,
+            total=int(payload.get("total", 0)),
+            page=page,
+            hosts=hosts,
+            fetched_at=self._now(),
+        )
         with self._conn() as conn:
             conn.execute(
                 "INSERT INTO shodan_scans (query, total, matches_json, created_at) VALUES (?, ?, ?, ?)",
-                (query, payload.get("total", 0), json.dumps(payload.get("matches", [])), now),
+                (query, result.total, json.dumps(payload.get("matches", [])), result.fetched_at.isoformat()),
             )
-        return ShodanScanResult(
-            query=query,
-            total=int(payload.get("total", 0)),
-            hosts=hosts,
-            created_at=now,
-        )
+        return result
 
     def list_shodan_scans(self, *, limit: int = 20) -> list[ShodanScanResult]:
         if limit < 1 or limit > 100:
@@ -654,15 +631,19 @@ class FleetManager:
                 "SELECT query, total, matches_json, created_at FROM shodan_scans ORDER BY id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
-        return [
-            ShodanScanResult(
-                query=row["query"],
-                total=int(row["total"]),
-                hosts=tuple(self._to_shodan_host(item) for item in json.loads(row["matches_json"])),
-                created_at=row["created_at"],
+        scans = []
+        for row in rows:
+            hosts = tuple(self._to_shodan_host(item) for item in json.loads(row["matches_json"]))
+            scans.append(
+                ShodanScanResult(
+                    query=row["query"],
+                    total=row["total"],
+                    page=1,
+                    hosts=hosts,
+                    fetched_at=datetime.fromisoformat(row["created_at"]),
+                )
             )
-            for row in rows
-        ]
+        return scans
 
     def import_shodan_hosts(self, hosts: list[dict], *, default_location: str = "Internet") -> list[Camera]:
         created = []
