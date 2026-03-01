@@ -3,7 +3,7 @@
 AgnostiCam is a **self-hosted camera operations dashboard** for IP cameras you explicitly configure yourself.
 
 > ✅ Designed for manually managed camera fleets.
-> ✅ Optional Shodan integration is available when you set an API key for IP discovery workflows.
+> ✅ Shodan integrated auto-hunting, scanning, and internet-wide camera discovery.
 
 ## Features
 
